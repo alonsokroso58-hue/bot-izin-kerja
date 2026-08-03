@@ -1,8 +1,27 @@
+import os
+import sys
 from datetime import datetime, date
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import BadRequest
+
+# ==============================================================================
+# 🔒 FITUR PENGUNCI SERVER RENDER
+# ==============================================================================
+# Render secara otomatis menetapkan variabel RENDER="true" di servernya.
+# Jika dijalankan di PC/VS Code/Zed lokal, variabel ini TIDAK ADA,
+# sehingga program akan langsung mematikan dirinya sendiri (EXIT).
+IS_RENDER = os.getenv("RENDER")
+
+if not IS_RENDER:
+    print("\n" + "="*60)
+    print("❌ AKSES DITOLAK!")
+    print("Bot ini dikunci dan HANYA BISA DIJALANKAN DI SERVER RENDER RESMI.")
+    print("Eksekusi dari VS Code / Zed / PC Lokal dibatalkan.")
+    print("="*60 + "\n")
+    sys.exit(1)
+# ==============================================================================
 
 # Simpan status sesi izin yang aktif
 active_sessions = {}
@@ -282,7 +301,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             start_time = session["start_time"]
             permission_type = session["type"]
             time_limit = session["time_limit"]
-            limit_mins = session["limit_mins"]
 
             end_time = datetime.now()
             duration = end_time - start_time
@@ -346,14 +364,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    TOKEN = "8866245372:AAH5UCzfGwRXqEZZRw5F5L_RgFaUwp5D5m8"
+    # Kamu juga bisa menyimpan TOKEN di Environment Variable Render (TELEGRAM_BOT_TOKEN)
+    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8866245372:AAH5UCzfGwRXqEZZRw5F5L_RgFaUwp5D5m8")
 
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("Bot berjalan dengan sanksi overtime 4 kali untuk semua izin...")
+    print("✅ Server Render Terverifikasi. Bot Izin Kerja siap dijalankan...")
     app.run_polling()
 
 
