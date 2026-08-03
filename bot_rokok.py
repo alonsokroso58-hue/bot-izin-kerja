@@ -1,17 +1,18 @@
 import os
 import sys
 from datetime import datetime, date
+from zoneinfo import ZoneInfo  # ⏰ Untuk mengunci zona waktu WIB
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import BadRequest
 
+# Definisi Zona Waktu Indonesia Barat (WIB / GMT+7)
+WIB = ZoneInfo("Asia/Jakarta")
+
 # ==============================================================================
 # 🔒 FITUR PENGUNCI SERVER RENDER
 # ==============================================================================
-# Render secara otomatis menetapkan variabel RENDER="true" di servernya.
-# Jika dijalankan di PC/VS Code/Zed lokal, variabel ini TIDAK ADA,
-# sehingga program akan langsung mematikan dirinya sendiri (EXIT).
 IS_RENDER = os.getenv("RENDER")
 
 if not IS_RENDER:
@@ -27,7 +28,6 @@ if not IS_RENDER:
 active_sessions = {}
 
 # Dictionary untuk melacak jumlah pelanggaran overtime harian per user
-# Format: { user_id: {"date": date(2026, 8, 2), "count": 2, "banned": False} }
 overtime_penalties = {}
 
 # Durasi maksimal dalam detik (600 detik = 10 menit)
@@ -54,7 +54,7 @@ def send_to_google_sheet(user_id, name, permission_type, duration_str, is_overti
         overtime_str = f"{ot_mins}m {ot_secs}s"
 
     payload = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S"), # Jam WIB untuk Sheet
         "name": name,
         "user_id": str(user_id),
         "type": permission_type,
@@ -113,7 +113,7 @@ async def repeating_alarm(context: ContextTypes.DEFAULT_TYPE):
         p_type = active_sessions[user_id]["type"]
         limit_mins = active_sessions[user_id]["limit_mins"]
         start_time = active_sessions[user_id]["start_time"]
-        dur = datetime.now() - start_time
+        dur = datetime.now(WIB) - start_time
         mins, secs = divmod(dur.seconds, 60)
 
         alarm_msg = (
@@ -195,9 +195,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = user.first_name
     chat_id = query.message.chat_id
     reply_markup = get_main_keyboard()
-    today = date.today()
+    today = datetime.now(WIB).date() # Menggunakan tanggal WIB
 
-    # Cek & reset data sanksi jika sudah berganti hari
+    # Cek & reset data sanksi jika sudah berganti hari (WIB)
     if user_id in overtime_penalties:
         if overtime_penalties[user_id]["date"] != today:
             overtime_penalties[user_id] = {"date": today, "count": 0, "banned": False}
@@ -247,7 +247,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "type": permission_type,
                 "time_limit": time_limit,
                 "limit_mins": limit_mins,
-                "start_time": datetime.now(),
+                "start_time": datetime.now(WIB), # Menggunakan waktu WIB
                 "job": job,
                 "alarm_job": None,
             }
@@ -302,7 +302,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             permission_type = session["type"]
             time_limit = session["time_limit"]
 
-            end_time = datetime.now()
+            end_time = datetime.now(WIB) # Waktu selesai WIB
             duration = end_time - start_time
 
             minutes, seconds = divmod(duration.seconds, 60)
@@ -353,7 +353,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "🟢 *Tidak ada yang sedang izin saat ini.* Semua ada di meja!"
         else:
             text = "📋 *Daftar Anggota yang Sedang Izin:*\n\n"
-            now = datetime.now()
+            now = datetime.now(WIB)
             for uid, data in active_sessions.items():
                 dur = now - data["start_time"]
                 mins, secs = divmod(dur.seconds, 60)
@@ -364,7 +364,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    # Kamu juga bisa menyimpan TOKEN di Environment Variable Render (TELEGRAM_BOT_TOKEN)
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8866245372:AAH5UCzfGwRXqEZZRw5F5L_RgFaUwp5D5m8")
 
     app = Application.builder().token(TOKEN).build()
@@ -372,7 +371,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("✅ Server Render Terverifikasi. Bot Izin Kerja siap dijalankan...")
+    print("✅ Server Render Terverifikasi. Bot Izin Kerja siap dijalankan (WIB Timezone)...")
     app.run_polling()
 
 
