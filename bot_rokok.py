@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -6,6 +6,10 @@ from telegram.error import BadRequest
 
 # Simpan status sesi izin yang aktif
 active_sessions = {}
+
+# Dictionary untuk melacak jumlah pelanggaran overtime harian per user
+# Format: { user_id: {"date": date(2026, 8, 2), "count": 2, "banned": False} }
+overtime_penalties = {}
 
 # Durasi maksimal dalam detik (600 detik = 10 menit)
 SMOKE_TIME_LIMIT = 600   # 10 menit untuk merokok
@@ -18,11 +22,17 @@ ALARM_INTERVAL_SECONDS = 120
 GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbzQq-9Q8o0CJd-eBaKANsTjiDiidJgPH6i3HwRWHXwHu-NZJGHM5HKaRExtVjTKs2Ot/exec"
 
 
-def send_to_google_sheet(user_id, name, permission_type, duration_str, is_overtime):
-    """Mengirim data riwayat izin ke Google Sheets secara otomatis."""
+def send_to_google_sheet(user_id, name, permission_type, duration_str, is_overtime, duration_seconds, time_limit):
+    """Mengirim data riwayat izin ke Google Sheets otomatis beserta durasi overtime-nya."""
     if not GOOGLE_SHEET_URL or GOOGLE_SHEET_URL == "PASTE_URL_WEB_APP_KAMU_DI_SINI":
         print("⚠️ Warning: URL Google Sheets belum diganti!")
         return
+
+    overtime_str = "0m 0s"
+    if is_overtime:
+        overtime_secs = duration_seconds - time_limit
+        ot_mins, ot_secs = divmod(overtime_secs, 60)
+        overtime_str = f"{ot_mins}m {ot_secs}s"
 
     payload = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -31,6 +41,7 @@ def send_to_google_sheet(user_id, name, permission_type, duration_str, is_overti
         "type": permission_type,
         "duration": duration_str,
         "overtime": "YA" if is_overtime else "TIDAK",
+        "overtime_duration": overtime_str,
     }
 
     try:
@@ -66,7 +77,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *Selamat datang di Bot Izin Kerja!*\n\n"
         "• 🚬 *Izin Merokok:* Batas waktu 10 menit.\n"
         "• 🍱 *Izin Ambil Makan:* Batas waktu 10 menit.\n\n"
-        "Setiap sesi yang selesai akan otomatis dicatat ke Google Sheets.",
+        "⚠️ *Perhatian:* Jika Anda melakukan *overtime* hingga 4 kali dalam sehari, Anda akan dikenakan sanksi tidak boleh mengambil izin (Merokok & Ambil Makan) selama sisa jam kerja hari ini!",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard(),
     )
@@ -93,24 +104,14 @@ async def repeating_alarm(context: ContextTypes.DEFAULT_TYPE):
             f"Harap segera kembali dan tekan tombol *✅ Selesai & Kembali*!"
         )
 
-        # 1. Kirim ke GRUP
         try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=alarm_msg,
-                parse_mode="Markdown",
-            )
+            await context.bot.send_message(chat_id=chat_id, text=alarm_msg, parse_mode="Markdown")
         except Exception as e:
             print(f"Gagal kirim alarm ke grup: {e}")
 
-        # 2. Kirim ke PRIVATE CHAT user
         if chat_id != user_id:
             try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=alarm_msg,
-                    parse_mode="Markdown",
-                )
+                await context.bot.send_message(chat_id=user_id, text=alarm_msg, parse_mode="Markdown")
             except Exception as e:
                 print(f"Gagal kirim alarm ke private chat: {e}")
 
@@ -133,28 +134,17 @@ async def timeout_warning(context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ *Alarm pengingat akan berulang setiap 2 menit sampai Anda kembali.*"
         )
 
-        # 1. Kirim ke GRUP
         try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=warning_msg,
-                parse_mode="Markdown",
-            )
+            await context.bot.send_message(chat_id=chat_id, text=warning_msg, parse_mode="Markdown")
         except Exception as e:
             print(f"Gagal kirim peringatan ke grup: {e}")
 
-        # 2. Kirim ke PRIVATE CHAT user
         if chat_id != user_id:
             try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=warning_msg,
-                    parse_mode="Markdown",
-                )
+                await context.bot.send_message(chat_id=user_id, text=warning_msg, parse_mode="Markdown")
             except Exception as e:
                 print(f"Gagal kirim peringatan ke private chat: {e}")
 
-        # Jalankan alarm pengingat berulang setiap 2 menit
         alarm_job = context.job_queue.run_repeating(
             repeating_alarm,
             interval=ALARM_INTERVAL_SECONDS,
@@ -166,13 +156,9 @@ async def timeout_warning(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def safe_edit_message(query, text, reply_markup):
-    """Fungsi pembantu untuk mengedit pesan tanpa menimbulkan error jika isi pesan sama."""
+    """Fungsi pembantu untuk mengedit pesan."""
     try:
-        await query.edit_message_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=reply_markup,
-        )
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
     except BadRequest as e:
         if "Message is not modified" in str(e):
             pass
@@ -190,9 +176,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = user.first_name
     chat_id = query.message.chat_id
     reply_markup = get_main_keyboard()
+    today = date.today()
 
-    # 1. Mulai Izin Merokok (10 Menit) ATAU Izin Ambil Makan (10 Menit)
+    # Cek & reset data sanksi jika sudah berganti hari
+    if user_id in overtime_penalties:
+        if overtime_penalties[user_id]["date"] != today:
+            overtime_penalties[user_id] = {"date": today, "count": 0, "banned": False}
+    else:
+        overtime_penalties[user_id] = {"date": today, "count": 0, "banned": False}
+
+    # 1. Mulai Izin Merokok atau Ambil Makan
     if query.data in ["start_smoke", "start_eat"]:
+        is_smoke = query.data == "start_smoke"
+
+        # Cek apakah user terkena sanksi banned izin hari ini
+        if overtime_penalties[user_id].get("banned", False):
+            text = (
+                f"❌ *SANKSI AKTIF!*\n\n"
+                f"Maaf *{user_name}*, Anda sudah melakukan *overtime* sebanyak **4 kali** hari ini.\n"
+                f"Anda dikenakan sanksi **tidak bisa mengambil izin (Merokok & Ambil Makan) selama sisa jam kerja hari ini**."
+            )
+            await safe_edit_message(query, text, reply_markup)
+            return
+
         if user_id in active_sessions:
             current_type = active_sessions[user_id]["type"]
             start_time = active_sessions[user_id]["start_time"].strftime("%H:%M:%S")
@@ -202,7 +208,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await safe_edit_message(query, text, reply_markup)
         else:
-            is_smoke = query.data == "start_smoke"
             permission_type = "Izin Merokok" if is_smoke else "Izin Ambil Makan"
             time_limit = SMOKE_TIME_LIMIT if is_smoke else EAT_TIME_LIMIT
             limit_mins = 10
@@ -247,20 +252,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             session = active_sessions[user_id]
 
-            # Hentikan timer & alarm jika ada
+            # Hentikan timer & alarm
             job = session.get("job")
             if job:
-                job.schedule_removal()
+                try:
+                    job.schedule_removal()
+                except Exception:
+                    pass
 
             alarm_job = session.get("alarm_job")
             if alarm_job:
-                alarm_job.schedule_removal()
+                try:
+                    alarm_job.schedule_removal()
+                except Exception:
+                    pass
 
             for j in context.job_queue.get_jobs_by_name(f"alarm_{user_id}"):
-                j.schedule_removal()
+                try:
+                    j.schedule_removal()
+                except Exception:
+                    pass
 
             for j in context.job_queue.get_jobs_by_name(f"timer_{user_id}"):
-                j.schedule_removal()
+                try:
+                    j.schedule_removal()
+                except Exception:
+                    pass
 
             start_time = session["start_time"]
             permission_type = session["type"]
@@ -274,13 +291,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             duration_str = f"{minutes}m {seconds}s"
             is_overtime = duration.seconds > time_limit
 
-            # 📤 KIRIM DATA KE GOOGLE SHEETS
-            send_to_google_sheet(user_id, user_name, permission_type, duration_str, is_overtime)
+            # Catat hitungan overtime jika melebihi batas (4 kali)
+            sanction_msg = ""
+            if is_overtime:
+                overtime_penalties[user_id]["count"] += 1
+                current_count = overtime_penalties[user_id]["count"]
 
-            overtime_msg = (
-                f"\n⚠️ *Catatan:* Melebihi batas waktu {limit_mins} menit! (Total: {duration_str})"
-                if is_overtime
-                else ""
+                if current_count >= 4:
+                    overtime_penalties[user_id]["banned"] = True
+                    sanction_msg = (
+                        f"\n\n🚨 **SANKSI DIKELUARKAN!**\n"
+                        f"Anda sudah melakukan *overtime* sebanyak **{current_count} kali** hari ini. "
+                        f"Anda dikenakan sanksi **tidak bisa mengambil izin (Merokok & Ambil Makan) selama sisa jam kerja hari ini**!"
+                    )
+                else:
+                    sanction_msg = f"\n⚠️ *Catatan:* Melebihi batas waktu! (Overtime ke-{current_count} hari ini)"
+
+            # 📤 KIRIM DATA KE GOOGLE SHEETS
+            send_to_google_sheet(
+                user_id,
+                user_name,
+                permission_type,
+                duration_str,
+                is_overtime,
+                duration.seconds,
+                time_limit
             )
 
             del active_sessions[user_id]
@@ -289,7 +324,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ *Selesai / Kembali Bekerja*\n\n"
                 f"👤 Nama: *{user_name}*\n"
                 f"📋 Jenis: *{permission_type}*\n"
-                f"⏱ Total Durasi: *{duration_str}*{overtime_msg}\n\n"
+                f"⏱ Total Durasi: *{duration_str}*{sanction_msg}\n\n"
                 f"📊 *Data berhasil dicatat ke Google Sheets!*"
             )
             await safe_edit_message(query, text, reply_markup)
@@ -318,7 +353,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("Bot berjalan...")
+    print("Bot berjalan dengan sanksi overtime 4 kali untuk semua izin...")
     app.run_polling()
 
 
